@@ -1,10 +1,9 @@
-# app.py
+# full_carry_calculator.py
 # PVC 全覆盖 / 全Carry 计算器（Streamlit）
-# - 自动推 12 个合约（按交割月第10交易日为最后交易日，+3交易日交割完成）
-# - 12个合约行情：每个合约一个输入框（期货价 + 新老货修正）
-# - 地域升贴水、新老货修正选项、其它成本
-# - 输出：盘面 vs 全覆盖 + 副轴正套空间柱状图
-# - 全部中文表头
+# 修正口径（按你的最新要求）：
+# - 期货行情：只做地域升贴水修正（修正后期货价 = 期货价 + 地域升贴水）
+# - 新老货价差：只修正“全覆盖/全carry”，并且通过选择一个节点合约开始生效（从该合约起统一加同一价差）
+# - 其它计算方式不改：资金=价格*占用比例*r*天数/365；仓储=元/吨/天*天数；+固定费用
 
 from dataclasses import dataclass
 from datetime import date
@@ -92,19 +91,22 @@ with colD:
     质检费 = st.number_input("质检费用（元/吨）", min_value=0.0, value=0.0, step=1.0)
     其它成本 = st.number_input("其它成本（元/吨）", min_value=0.0, value=0.0, step=5.0)
 
+# 地域升贴水（只修正期货行情）
 地域预设 = {
     "华东（默认）": 0.0,
     "华北(山东)": 0.0,
     "华北(天津)": 0.0,
     "自定义": 0.0,
 }
-地域 = st.selectbox("地域（用于升贴水修正）", list(地域预设.keys()), index=0)
+地域 = st.selectbox("地域（用于期货行情升贴水修正）", list(地域预设.keys()), index=0)
 地域升贴水默认 = float(地域预设.get(地域, 0.0))
 地域升贴水 = st.number_input("地域升贴水（元/吨，可手动覆盖）", value=地域升贴水默认, step=5.0)
 
 占用比例 = 1.0 if 资金占用口径 == "全额(100%)" else float(保证金比例)
 仓储单价 = float(仓储_现货) if 仓储口径 == "用现货仓储" else float(仓储_仓单)
-固定费用合计 = float(交割手续费 + 出入库费 + 质检费 + 其它成本 + 地域升贴水)
+
+# 固定费用（每吨）：这里不包含“地域升贴水”，因为地域升贴水只用于修正期货行情
+固定费用合计 = float(交割手续费 + 出入库费 + 质检费 + 其它成本)
 
 st.divider()
 
@@ -121,34 +123,19 @@ st.write(
 )
 
 # --------------------------
-# 12个行情输入框（你要的）
+# 12个期货行情输入框（只填期货价）
 # --------------------------
-st.subheader("12个合约行情输入（手动）")
+st.subheader("12个合约期货行情输入（手动）")
 
-# 批量新老货修正（可选）
-with st.expander("新老货修正（可选：批量填充）", expanded=False):
-    批量价差 = st.number_input("批量新老货价差（元/吨）", value=0.0, step=5.0)
-    起始合约 = st.selectbox("从哪个合约开始填？", options=[s.合约 for s in specs], index=0)
-
-# 用两行输入：第一行期货价，第二行新老货
-cols = st.columns(6)
-f_price = {}
-adj = {}
-
-# 为了避免每次刷新丢失输入，用 session_state 记住
-for i, s in enumerate(specs):
+# session_state 记忆输入
+for s in specs:
     key_p = f"p_{s.合约}"
-    key_a = f"a_{s.合约}"
     if key_p not in st.session_state:
         st.session_state[key_p] = 0.0
-    if key_a not in st.session_state:
-        st.session_state[key_a] = 0.0
 
-# 第一排：期货价格
-st.markdown("**期货价格（元/吨）**")
+cols = st.columns(6)
 for i, s in enumerate(specs):
-    c = cols[i % 6]
-    with c:
+    with cols[i % 6]:
         st.session_state[f"p_{s.合约}"] = st.number_input(
             label=f"{s.合约}",
             value=float(st.session_state[f"p_{s.合约}"]),
@@ -156,28 +143,19 @@ for i, s in enumerate(specs):
             format="%.2f",
             key=f"inp_price_{s.合约}",
         )
-        f_price[s.合约] = float(st.session_state[f"p_{s.合约}"])
 
-# 第二排：新老货修正
-st.markdown("**新老货价差修正（元/吨）**（可逐个填，或用上面的批量填充）")
-cols2 = st.columns(6)
-for i, s in enumerate(specs):
-    # 批量填充：从起始合约开始的合约，若用户设置了批量价差，则覆盖该输入框默认值
-    if 批量价差 != 0.0:
-        start_idx = [x.合约 for x in specs].index(起始合约)
-        if i >= start_idx:
-            st.session_state[f"a_{s.合约}"] = float(批量价差)
+st.divider()
 
-    c = cols2[i % 6]
-    with c:
-        st.session_state[f"a_{s.合约}"] = st.number_input(
-            label=f"{s.合约}",
-            value=float(st.session_state[f"a_{s.合约}"]),
-            step=1.0,
-            format="%.2f",
-            key=f"inp_adj_{s.合约}",
-        )
-        adj[s.合约] = float(st.session_state[f"a_{s.合约}"])
+# --------------------------
+# 新老货修正：只修正全覆盖，并通过“节点合约”开始生效
+# --------------------------
+st.subheader("新老货价差修正（仅作用于全覆盖：从节点合约开始生效）")
+
+新老货价差 = st.number_input("新老货价差（元/吨）", value=0.0, step=5.0)
+节点合约 = st.selectbox("从哪个合约开始计入新老货价差？", options=[s.合约 for s in specs], index=0)
+节点索引 = [s.合约 for s in specs].index(节点合约)
+
+st.caption("解释：从“节点合约”及其之后的合约，全覆盖理论价会统一 + 新老货价差；盘面期货价格不受新老货价差影响。")
 
 st.divider()
 
@@ -185,12 +163,18 @@ st.divider()
 # 计算表
 # --------------------------
 rows = []
-for s in specs:
+for i, s in enumerate(specs):
     天数 = days_to_delivery_done(今天, s.交割完成日)
-    期货价 = f_price.get(s.合约, 0.0)
-    新老货修正 = adj.get(s.合约, 0.0)
 
-    资金成本 = 期货价 * 占用比例 * 年化利率 * 天数 / 365.0
+    期货价_原始 = float(st.session_state.get(f"p_{s.合约}", 0.0))
+    # 期货行情地域修正：只修正盘面
+    期货价_地域修正后 = 期货价_原始 + float(地域升贴水)
+
+    # 全覆盖侧的新老货修正（从节点开始）
+    新老货修正 = float(新老货价差) if i >= 节点索引 else 0.0
+
+    # 资金/仓储（不改口径：仍然用“期货价格”为基数；这里用“地域修正后的期货价”更贴近你做地区可比）
+    资金成本 = 期货价_地域修正后 * 占用比例 * 年化利率 * 天数 / 365.0
     仓储成本 = 仓储单价 * 天数
     资金仓储 = 资金成本 + 仓储成本
 
@@ -198,8 +182,10 @@ for s in specs:
     全carry修正后 = 全carry修正前 + 新老货修正
 
     全覆盖理论价 = 现货价 + 全carry修正后
-    市场基差 = 现货价 - 期货价
-    正套空间 = 期货价 - 全覆盖理论价
+
+    # 基差/正套空间：基于“地域修正后的期货价”
+    市场基差 = 现货价 - 期货价_地域修正后
+    正套空间 = 期货价_地域修正后 - 全覆盖理论价
 
     rows.append({
         "合约": s.合约,
@@ -208,16 +194,23 @@ for s in specs:
         "最后交易日": s.最后交易日.date().isoformat(),
         "交割完成日": s.交割完成日.date().isoformat(),
         "到交割完成日天数": 天数,
-        "期货价格（元/吨）": 期货价,
-        "新老货价差修正（元/吨）": 新老货修正,
+
+        "期货价格（原始）": 期货价_原始,
+        "地域升贴水（期货）": float(地域升贴水),
+        "期货价格（地域修正后）": 期货价_地域修正后,
+
+        "新老货价差修正（全覆盖）": 新老货修正,
+
         "资金成本（元/吨）": 资金成本,
         "仓储成本（元/吨）": 仓储成本,
         "资金+仓储（元/吨）": 资金仓储,
+
         "全carry（修正前）（元/吨）": 全carry修正前,
         "全carry（修正后）（元/吨）": 全carry修正后,
         "全覆盖理论价（修正后）（元/吨）": 全覆盖理论价,
-        "市场基差（现货-期货）（元/吨）": 市场基差,
-        "正套空间（期货-全覆盖）（元/吨）": 正套空间,
+
+        "市场基差（现货-期货修正后）（元/吨）": 市场基差,
+        "正套空间（期货修正后-全覆盖）（元/吨）": 正套空间,
     })
 
 calc = pd.DataFrame(rows)
@@ -228,7 +221,7 @@ st.dataframe(calc.round(4), use_container_width=True)
 st.divider()
 
 # --------------------------
-# 可视化：盘面 vs 全覆盖 + 副轴正套空间柱状
+# 可视化：盘面(地域修正后) vs 全覆盖 + 副轴正套空间柱状
 # --------------------------
 st.subheader("可视化（盘面 vs 全覆盖 + 副轴正套空间）")
 
@@ -236,28 +229,34 @@ fig = make_subplots(specs=[[{"secondary_y": True}]])
 
 fig.add_trace(
     go.Scatter(
-        x=calc["合约"], y=calc["期货价格（元/吨）"],
-        mode="lines+markers", name="盘面期货价格"
+        x=calc["合约"],
+        y=calc["期货价格（地域修正后）"],
+        mode="lines+markers",
+        name="盘面期货价格（地域修正后）"
     ),
     secondary_y=False
 )
 fig.add_trace(
     go.Scatter(
-        x=calc["合约"], y=calc["全覆盖理论价（修正后）（元/吨）"],
-        mode="lines+markers", name="全覆盖理论价（修正后）"
+        x=calc["合约"],
+        y=calc["全覆盖理论价（修正后）（元/吨）"],
+        mode="lines+markers",
+        name="全覆盖理论价（含新老货修正）"
     ),
     secondary_y=False
 )
 fig.add_trace(
     go.Bar(
-        x=calc["合约"], y=calc["正套空间（期货-全覆盖）（元/吨）"],
-        name="正套空间（期货-全覆盖）", opacity=0.55
+        x=calc["合约"],
+        y=calc["正套空间（期货修正后-全覆盖）（元/吨）"],
+        name="正套空间（期货-全覆盖）",
+        opacity=0.55
     ),
     secondary_y=True
 )
 
 fig.update_layout(
-    title="PVC：盘面期限结构 vs 全覆盖理论线（副轴：正套空间）",
+    title="PVC：盘面期限结构（地域修正） vs 全覆盖理论线（副轴：正套空间）",
     barmode="overlay",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     margin=dict(l=20, r=20, t=60, b=20),
@@ -270,7 +269,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# 成本拆解（可选）
+# 成本拆解
 st.subheader("全Carry 成本拆解（修正前/后）")
 bar_df = calc[["合约","资金+仓储（元/吨）","全carry（修正前）（元/吨）","全carry（修正后）（元/吨）"]].melt(
     id_vars="合约", var_name="项目", value_name="金额"
@@ -287,5 +286,5 @@ st.download_button(
 
 st.caption(
     "注：天数=从今天到交割完成日（最后交易日=交割月第10交易日，交割完成=+3交易日）。"
-    "交易日用工作日近似，未扣除法定假期；如需精确交易所日历，可增加节假日/交易日历表。")
-
+    "交易日用工作日近似，未扣除法定假期；如需精确交易所日历，可增加节假日/交易日历表。"
+)
